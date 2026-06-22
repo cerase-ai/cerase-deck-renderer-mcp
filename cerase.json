@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "namespace": "studio.guidance",
+  "name": "cerase-deck-renderer",
+  "type": "connector",
+  "display_name": "Cerase Deck Renderer",
+  "description": "Render a markdown (md2) presentation into a PDF.",
+  "license": "MIT",
+  "install": {
+    "image": "ghcr.io/cerase-ai/cerase-deck-renderer-mcp:latest"
+  },
+  "auth": {
+    "kind": "none",
+    "credential_scope": "tenant"
+  }
+}

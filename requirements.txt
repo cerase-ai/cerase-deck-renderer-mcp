@@ -1,0 +1,10 @@
+# cerase-deck-renderer MCP — Python dependency lock (OPT-15).
+#
+# Versions chosen to match what the Dockerfile previously installed
+# unpinned + the existing version ranges declared inline. md2-presenter
+# stays installed via `uv tool` (Dockerfile) because we want it on a
+# separate isolated venv with the binary linked into /usr/local/bin/md2;
+# its pin (==0.2.0) lives in the Dockerfile.
+mcp>=1.0,<2.0
+mcp-proxy>=0.3,<1.0
+uv>=0.5,<1.0
