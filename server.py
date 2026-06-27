@@ -19,7 +19,9 @@ import os
 import shutil
 import subprocess
 import tempfile
+import urllib.request
 import uuid
+from urllib.parse import urlencode
 
 from mcp.server.fastmcp import FastMCP
 
@@ -33,10 +35,37 @@ CHROMIUM_BIN = (
 MD2_BIN = shutil.which("md2") or "/usr/local/bin/md2"
 
 
+def _write_workspace_file(agent_id: str | None, path: str, data: bytes) -> bool:
+    """M-WORKSPACE-WRITE-BROKER-1 — write a produced artifact back into the
+    calling agent's workspace via the control-plane broker (this runner mounts
+    no agent volume). The control-plane owns workspace access (docker exec),
+    scopes the write to (agent_id, path), and caps it. Returns True on success,
+    False when not configured — the caller then falls back to base64 (dev / a
+    non-agent call).
+    """
+    cp = os.environ.get("CERASE_CONTROL_PLANE_URL", "").rstrip("/")
+    secret = os.environ.get("CERASE_INTERNAL_SECRET", "")
+    if not agent_id or not cp or not secret:
+        return False
+    qs = urlencode({"path": path})
+    req = urllib.request.Request(
+        f"{cp}/api/internal/workspace-file/{agent_id}?{qs}",
+        data=data,
+        method="PUT",
+        headers={
+            "Authorization": f"Bearer {secret}",
+            "Content-Type": "application/octet-stream",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=60) as r:  # noqa: S310 — internal API
+        return 200 <= r.status < 300
+
+
 @mcp.tool()
 def render(
     markdown_content: str,
     output_filename: str = "presentation.pdf",
+    agent_id: str | None = None,
 ) -> dict:
     """Render md2-flavoured markdown to a deck PDF.
 
@@ -44,13 +73,15 @@ def render(
         markdown_content: the full markdown source. Frontmatter (+++ TOML)
             and slide separators (--- on its own line) follow md2 syntax —
             see the deck skill in cerase-ai/cerase-skills for the cheatsheet.
-        output_filename: filename to report in the response payload. Does
-            not affect on-disk artefacts (the PDF is returned as base64).
+        output_filename: the filename for the produced PDF (written under
+            `outputs/` in your workspace).
+        agent_id: injected by the platform — do not set it.
 
     Returns:
-        A dict with `filename`, `size_bytes`, and `contents_base64` (the
-        full PDF). The caller (agent skill) is expected to either save it
-        into its workspace or surface it directly in the chat reply.
+        Normally `{path, filename, size_bytes}` — the PDF is written into your
+        workspace at `path`; send it with `[[attach: <path>]]`. If the workspace
+        broker isn't configured (dev), falls back to `{filename, size_bytes,
+        contents_base64}`.
     """
     if not markdown_content.strip():
         raise ValueError("markdown_content is empty")
@@ -110,6 +141,13 @@ def render(
         with open(pdf_path, "rb") as f:
             pdf_bytes = f.read()
 
+        # M-WORKSPACE-WRITE-BROKER-1: write into the agent's workspace and return
+        # a small {path} handle — avoids the federated 1 MB base64 truncation that
+        # silently corrupts non-trivial decks, plus the model-context bloat. Falls
+        # back to base64 when the broker isn't configured (dev / a non-agent call).
+        rel = f"outputs/{output_filename}"
+        if _write_workspace_file(agent_id, rel, pdf_bytes):
+            return {"path": rel, "filename": output_filename, "size_bytes": len(pdf_bytes)}
         return {
             "filename": output_filename,
             "size_bytes": len(pdf_bytes),
