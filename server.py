@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """Cerase Deck Renderer — MCP server.
 
-Exposes a single tool `render(markdown_content, output_filename?)` that
-takes md2-flavoured markdown and returns a base64-encoded PDF. The
-markdown→HTML conversion is delegated to the md2 CLI (md2-presenter on
-PyPI); the HTML→PDF step shells out to headless chromium.
+Exposes a single tool `render(markdown_content, output_filename?, template?,
+template_css?, dark?)` that takes md2-flavoured markdown and writes a deck PDF
+into the agent workspace (via the control-plane broker), returning a `{path}`
+handle. The markdown→HTML conversion is delegated to the md2 CLI (md2-presenter
+on PyPI); the HTML→PDF step shells out to headless chromium.
 
-Cerase plumbing: this server speaks the MCP stdio protocol; the
-container's entrypoint pipes it through mcp-proxy which exposes
-/sse over HTTP on port 3000 — the contract every Cerase MCP container
-honours (see agent-runtime/mcp-runner/docker/entrypoint.sh for the parallel
-pattern).
+Theming (M-DECK-CUSTOM-TEMPLATE-1): md2 0.2.0 supports named templates under
+`~/.md2/templates/` (`--template NAME`) + a `--dark` default. We expose those,
+plus a by-value `template_css` brand override: it derives a one-shot template
+from `default` with the supplied CSS appended (last-wins cascade), renders with
+it, then removes it. A full multi-file template is a named/marketplace template.
+
+Cerase plumbing: this server speaks the MCP stdio protocol; the container's
+entrypoint pipes it through mcp-proxy which exposes /sse over HTTP on port 3000.
 """
 from __future__ import annotations
 
 import base64
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -33,6 +38,9 @@ CHROMIUM_BIN = (
     or "/usr/bin/chromium"
 )
 MD2_BIN = shutil.which("md2") or "/usr/local/bin/md2"
+
+_TEMPLATES_ROOT = os.path.expanduser("~/.md2/templates")
+_SAFE_TEMPLATE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _write_workspace_file(agent_id: str | None, path: str, data: bytes) -> bool:
@@ -61,21 +69,86 @@ def _write_workspace_file(agent_id: str | None, path: str, data: bytes) -> bool:
         return 200 <= r.status < 300
 
 
+def _ensure_default_template() -> bool:
+    """Make sure `~/.md2/templates/default/` exists (md2 --init-templates).
+    Returns True when a usable default template dir is present."""
+    default_dir = os.path.join(_TEMPLATES_ROOT, "default")
+    if not os.path.isdir(default_dir):
+        subprocess.run([MD2_BIN, "--init-templates"], capture_output=True, text=True, timeout=30)
+    return os.path.isdir(default_dir)
+
+
+def _derive_template_from_css(template_css: str) -> str | None:
+    """Build a one-shot md2 template: copy `default` and append the supplied
+    brand CSS to its `style.css` (cascade — last wins). Returns the derived
+    template dir path (caller removes it), or None when the default is absent."""
+    if not _ensure_default_template():
+        return None
+    default_dir = os.path.join(_TEMPLATES_ROOT, "default")
+    name = f"cerase-{uuid.uuid4().hex[:8]}"
+    derived = os.path.join(_TEMPLATES_ROOT, name)
+    shutil.copytree(default_dir, derived)
+    with open(os.path.join(derived, "style.css"), "a", encoding="utf-8") as f:
+        f.write("\n/* M-DECK-CUSTOM-TEMPLATE-1: per-render brand override */\n")
+        f.write(template_css)
+    return derived
+
+
+def _md2_command(
+    md_path: str,
+    template: str | None,
+    template_css: str | None,
+    dark: bool,
+) -> tuple[list[str], str | None]:
+    """Assemble the md2 argv + return a derived-template dir to clean up (or
+    None). `template_css` (by-value brand) wins over a named `template`."""
+    args = [MD2_BIN]
+    if dark:
+        args.append("--dark")
+    cleanup_dir: str | None = None
+    name: str | None = None
+    if template_css and template_css.strip():
+        cleanup_dir = _derive_template_from_css(template_css)
+        if cleanup_dir is not None:
+            name = os.path.basename(cleanup_dir)
+    elif template:
+        if not _SAFE_TEMPLATE_NAME.match(template):
+            raise ValueError(
+                "template must be a simple name ([A-Za-z0-9_-]); it selects a "
+                "template under ~/.md2/templates/"
+            )
+        name = template
+    if name:
+        args += ["--template", name]
+    args.append(md_path)
+    return args, cleanup_dir
+
+
 @mcp.tool()
 def render(
     markdown_content: str,
     output_filename: str = "presentation.pdf",
     agent_id: str | None = None,
+    template: str | None = None,
+    template_css: str | None = None,
+    dark: bool = False,
 ) -> dict:
     """Render md2-flavoured markdown to a deck PDF.
 
     Args:
         markdown_content: the full markdown source. Frontmatter (+++ TOML)
             and slide separators (--- on its own line) follow md2 syntax —
-            see the deck skill in cerase-ai/cerase-skills for the cheatsheet.
+            see the deck skill for the cheatsheet.
         output_filename: the filename for the produced PDF (written under
             `outputs/` in your workspace).
         agent_id: injected by the platform — do not set it.
+        template: optional NAME of an installed md2 template (under
+            `~/.md2/templates/`) — e.g. a brand template. Ignored when
+            `template_css` is given.
+        template_css: optional brand CSS applied on top of the default theme
+            (colours / fonts / logo positioning) — passed by value, no file
+            needed. Wins over `template`.
+        dark: render on md2's dark theme.
 
     Returns:
         Normally `{path, filename, size_bytes}` — the PDF is written into your
@@ -90,14 +163,16 @@ def render(
     md_path = os.path.join(workdir, "input.md")
     html_path = os.path.join(workdir, "input.html")
     pdf_path = os.path.join(workdir, output_filename)
+    cleanup_template: str | None = None
 
     try:
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(markdown_content)
 
         # md2 reads <name>.md and writes <name>.html next to it.
+        md2_argv, cleanup_template = _md2_command(md_path, template, template_css, dark)
         md2_result = subprocess.run(
-            [MD2_BIN, md_path],
+            md2_argv,
             capture_output=True,
             text=True,
             timeout=30,
@@ -155,6 +230,8 @@ def render(
         }
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+        if cleanup_template:
+            shutil.rmtree(cleanup_template, ignore_errors=True)
 
 
 if __name__ == "__main__":
