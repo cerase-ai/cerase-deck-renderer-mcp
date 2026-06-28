@@ -13,6 +13,11 @@ plus a by-value `template_css` brand override: it derives a one-shot template
 from `default` with the supplied CSS appended (last-wins cascade), renders with
 it, then removes it. A full multi-file template is a named/marketplace template.
 
+Follow-on: the same brand CSS can be supplied BY REFERENCE as `template_path` —
+a workspace file the read broker resolves (for overrides too big to inline, e.g.
+embedded `@font-face` data URIs). Its content is treated exactly like
+`template_css`; an explicit by-value `template_css` still wins.
+
 Cerase plumbing: this server speaks the MCP stdio protocol; the container's
 entrypoint pipes it through mcp-proxy which exposes /sse over HTTP on port 3000.
 """
@@ -67,6 +72,49 @@ def _write_workspace_file(agent_id: str | None, path: str, data: bytes) -> bool:
     )
     with urllib.request.urlopen(req, timeout=60) as r:  # noqa: S310 — internal API
         return 200 <= r.status < 300
+
+
+# ─── Read broker (mirror office-converter) — resolve a by-reference template ──
+
+def _safe_local_path(path: str) -> str:
+    """Resolve a workspace path, refusing anything that escapes the shared
+    workspace root (path-traversal guard — the agent supplies `path`, so a
+    crafted `../../etc/passwd` must not read host files)."""
+    root = os.path.realpath(os.environ.get("CERASE_TOOL_WORKSPACE_ROOT", "/workspace"))
+    resolved = os.path.realpath(path)
+    if resolved != root and not resolved.startswith(root + os.sep):
+        raise ValueError("path escapes the workspace root")
+    return resolved
+
+
+def _load_workspace_bytes(agent_id: str | None, path: str) -> bytes:
+    """Read a workspace file's CONTENT (M-DECK-CUSTOM-TEMPLATE-1 follow-on — a
+    by-reference `template_path`). Try a local mount first (dev/test where
+    CERASE_TOOL_WORKSPACE_ROOT IS the agent's workspace), then fall back to the
+    control-plane internal API (it owns workspace access via docker exec) scoped
+    to (agent_id, path)."""
+    try:
+        local = _safe_local_path(path)
+        if os.path.isfile(local):
+            with open(local, "rb") as f:
+                return f.read()
+    except ValueError:
+        pass  # not a safe local path → let the control-plane re-guard + serve
+
+    cp = os.environ.get("CERASE_CONTROL_PLANE_URL", "").rstrip("/")
+    secret = os.environ.get("CERASE_INTERNAL_SECRET", "")
+    if not agent_id or not cp or not secret:
+        raise ValueError(
+            "workspace `template_path` given but no local file and no control-plane "
+            "configured (agent_id / CERASE_CONTROL_PLANE_URL / CERASE_INTERNAL_SECRET)"
+        )
+    qs = urlencode({"path": path})
+    req = urllib.request.Request(
+        f"{cp}/api/internal/workspace-file/{agent_id}?{qs}",
+        headers={"Authorization": f"Bearer {secret}"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310 — internal API
+        return r.read()
 
 
 def _ensure_default_template() -> bool:
@@ -131,6 +179,7 @@ def render(
     agent_id: str | None = None,
     template: str | None = None,
     template_css: str | None = None,
+    template_path: str | None = None,
     dark: bool = False,
 ) -> dict:
     """Render md2-flavoured markdown to a deck PDF.
@@ -144,10 +193,15 @@ def render(
         agent_id: injected by the platform — do not set it.
         template: optional NAME of an installed md2 template (under
             `~/.md2/templates/`) — e.g. a brand template. Ignored when
-            `template_css` is given.
+            `template_css` / `template_path` is given.
         template_css: optional brand CSS applied on top of the default theme
             (colours / fonts / logo positioning) — passed by value, no file
-            needed. Wins over `template`.
+            needed. Wins over `template_path` and `template`.
+        template_path: optional workspace path to a brand-CSS file, resolved by
+            the read broker — the by-reference form of `template_css`, for
+            overrides too big to inline (e.g. embedded `@font-face` data URIs).
+            Its content is applied exactly like `template_css`. Ignored when an
+            explicit `template_css` is also given.
         dark: render on md2's dark theme.
 
     Returns:
@@ -158,6 +212,11 @@ def render(
     """
     if not markdown_content.strip():
         raise ValueError("markdown_content is empty")
+
+    # By-reference brand override: read the workspace file and treat its content
+    # as `template_css`. An explicit by-value `template_css` wins.
+    if template_path and not (template_css and template_css.strip()):
+        template_css = _load_workspace_bytes(agent_id, template_path).decode("utf-8")
 
     workdir = tempfile.mkdtemp(prefix=f"deck-{uuid.uuid4().hex[:8]}-")
     md_path = os.path.join(workdir, "input.md")

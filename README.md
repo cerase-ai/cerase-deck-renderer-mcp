@@ -28,11 +28,30 @@ docker run --rm -p 3000:3000 cerase-deck-renderer-mcp:0.1.0-dev
 
 ## Tool surface
 
-One tool: `render(markdown_content: str, output_filename: str = "presentation.pdf") -> dict`
+One tool:
 
-Returns `{filename, size_bytes, contents_base64}`. The base64 payload is
-the full PDF — the caller is expected to save it into its workspace or
-attach it directly to the user reply.
+```
+render(
+    markdown_content: str,
+    output_filename: str = "presentation.pdf",
+    template: str | None = None,        # NAME of an installed md2 template
+    template_css: str | None = None,    # brand CSS override, by value
+    template_path: str | None = None,   # brand CSS override, by workspace ref
+    dark: bool = False,
+) -> dict
+```
+
+Theming: `template` selects an installed md2 template; `template_css`
+appends a brand CSS override on top of the default theme by value;
+`template_path` is the by-reference form (a workspace file the read
+broker resolves, for overrides too big to inline — e.g. embedded
+`@font-face` data URIs). Precedence: `template_css` > `template_path` >
+`template`.
+
+Returns `{path, filename, size_bytes}` when the workspace write-broker is
+configured — the PDF is written into the caller's workspace and returned
+as a small handle. Falls back to `{filename, size_bytes, contents_base64}`
+(the full PDF inline) for a dev / non-agent call.
 
 ## md2 syntax reference
 
