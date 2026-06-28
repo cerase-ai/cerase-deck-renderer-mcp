@@ -32,8 +32,16 @@ RUN pip install --no-cache-dir -r /tmp/requirements.lock \
 # md2-presenter — the markdown → HTML/PDF tool the renderer wraps.
 # Pinned version aligns with what we publish on PyPI from
 # github.com/guidance-studio/md2.
-RUN uv tool install md2-presenter==0.2.0 && \
-    ln -s /root/.local/bin/md2 /usr/local/bin/md2
+# M-DECK-NONROOT-MD2-1: install into a world-traversable system location, NOT
+# root's home. uv puts the tool venv under UV_TOOL_DIR and the launcher into
+# UV_TOOL_BIN_DIR — both /opt and /usr/local/bin are 0755, so the uid-1000
+# appuser runtime can traverse + exec it. The previous layout installed into
+# /root/.local/bin and symlinked /usr/local/bin/md2 → it, but /root is mode
+# 700: appuser couldn't traverse it, so `md2` was unrunnable (Errno 13). The
+# ENV must precede the install (it changes where uv writes).
+ENV UV_TOOL_DIR=/opt/uv/tools \
+    UV_TOOL_BIN_DIR=/usr/local/bin
+RUN uv tool install md2-presenter==0.2.0
 
 # MCP server skeleton.
 COPY server.py /app/server.py
@@ -42,7 +50,7 @@ COPY server.py /app/server.py
 # server.py (the comment around the chromium spawn references this).
 RUN groupadd -r appuser \
  && useradd -r -g appuser -u 1000 -m -d /home/appuser -s /usr/sbin/nologin appuser \
- && chown -R appuser:appuser /app /root/.local
+ && chown -R appuser:appuser /app
 USER appuser
 WORKDIR /home/appuser
 
