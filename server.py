@@ -48,7 +48,9 @@ _TEMPLATES_ROOT = os.path.expanduser("~/.md2/templates")
 _SAFE_TEMPLATE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
-def _write_workspace_file(agent_id: str | None, path: str, data: bytes) -> bool:
+def _write_workspace_file(
+    agent_id: str | None, path: str, data: bytes, binding: str = ""
+) -> bool:
     """M-WORKSPACE-WRITE-BROKER-1 — write a produced artifact back into the
     calling agent's workspace via the control-plane broker (this runner mounts
     no agent volume). The control-plane owns workspace access (docker exec),
@@ -61,14 +63,19 @@ def _write_workspace_file(agent_id: str | None, path: str, data: bytes) -> bool:
     if not agent_id or not cp or not secret:
         return False
     qs = urlencode({"path": path})
+    # M-SEC-TOKEN-BINDING-1: the broker requires the calling agent's binding
+    # (gateway-injected tool arg) besides the shared bearer.
+    headers = {
+        "Authorization": f"Bearer {secret}",
+        "Content-Type": "application/octet-stream",
+    }
+    if binding:
+        headers["X-Cerase-Agent-Binding"] = binding
     req = urllib.request.Request(
         f"{cp}/api/internal/workspace-file/{agent_id}?{qs}",
         data=data,
         method="PUT",
-        headers={
-            "Authorization": f"Bearer {secret}",
-            "Content-Type": "application/octet-stream",
-        },
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=60) as r:  # noqa: S310 — internal API
         return 200 <= r.status < 300
@@ -87,7 +94,7 @@ def _safe_local_path(path: str) -> str:
     return resolved
 
 
-def _load_workspace_bytes(agent_id: str | None, path: str) -> bytes:
+def _load_workspace_bytes(agent_id: str | None, path: str, binding: str = "") -> bytes:
     """Read a workspace file's CONTENT (M-DECK-CUSTOM-TEMPLATE-1 follow-on — a
     by-reference `template_path`). Try a local mount first (dev/test where
     CERASE_TOOL_WORKSPACE_ROOT IS the agent's workspace), then fall back to the
@@ -109,9 +116,12 @@ def _load_workspace_bytes(agent_id: str | None, path: str) -> bytes:
             "configured (agent_id / CERASE_CONTROL_PLANE_URL / CERASE_INTERNAL_SECRET)"
         )
     qs = urlencode({"path": path})
+    headers = {"Authorization": f"Bearer {secret}"}
+    if binding:
+        headers["X-Cerase-Agent-Binding"] = binding
     req = urllib.request.Request(
         f"{cp}/api/internal/workspace-file/{agent_id}?{qs}",
-        headers={"Authorization": f"Bearer {secret}"},
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310 — internal API
         return r.read()
@@ -181,6 +191,7 @@ def render(
     template_css: str | None = None,
     template_path: str | None = None,
     dark: bool = False,
+    agent_binding: str = "",
 ) -> dict:
     """Render md2-flavoured markdown to a deck PDF.
 
@@ -203,6 +214,8 @@ def render(
             Its content is applied exactly like `template_css`. Ignored when an
             explicit `template_css` is also given.
         dark: render on md2's dark theme.
+        agent_binding: injected by the platform (M-SEC-TOKEN-BINDING-1
+            second factor for the workspace-file broker) — do not set it.
 
     Returns:
         Normally `{path, filename, size_bytes}` — the PDF is written into your
@@ -216,7 +229,7 @@ def render(
     # By-reference brand override: read the workspace file and treat its content
     # as `template_css`. An explicit by-value `template_css` wins.
     if template_path and not (template_css and template_css.strip()):
-        template_css = _load_workspace_bytes(agent_id, template_path).decode("utf-8")
+        template_css = _load_workspace_bytes(agent_id, template_path, agent_binding).decode("utf-8")
 
     workdir = tempfile.mkdtemp(prefix=f"deck-{uuid.uuid4().hex[:8]}-")
     md_path = os.path.join(workdir, "input.md")
@@ -280,7 +293,7 @@ def render(
         # silently corrupts non-trivial decks, plus the model-context bloat. Falls
         # back to base64 when the broker isn't configured (dev / a non-agent call).
         rel = f"outputs/{output_filename}"
-        if _write_workspace_file(agent_id, rel, pdf_bytes):
+        if _write_workspace_file(agent_id, rel, pdf_bytes, agent_binding):
             return {"path": rel, "filename": output_filename, "size_bytes": len(pdf_bytes)}
         return {
             "filename": output_filename,
