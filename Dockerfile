@@ -41,7 +41,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.lock \
 # ENV must precede the install (it changes where uv writes).
 ENV UV_TOOL_DIR=/opt/uv/tools \
     UV_TOOL_BIN_DIR=/usr/local/bin
-RUN uv tool install md2-presenter==0.2.0
+RUN uv tool install md2-presenter==0.2.1
 
 # MCP server skeleton.
 COPY server.py /app/server.py
