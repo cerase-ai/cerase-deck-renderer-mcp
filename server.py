@@ -196,32 +196,17 @@ def render(
     """Render md2-flavoured markdown to a deck PDF.
 
     Args:
-        markdown_content: the full markdown source. Frontmatter (+++ TOML)
-            and slide separators (--- on its own line) follow md2 syntax —
-            see the deck skill for the cheatsheet.
-        output_filename: the filename for the produced PDF (written under
-            `outputs/` in your workspace).
+        markdown_content: the full markdown source. Frontmatter (+++ TOML) and slide separators (--- on its own line) follow md2 syntax — see the deck skill for the cheatsheet.
+        output_filename: the filename for the produced PDF (written under `outputs/` in your workspace).
         agent_id: injected by the platform — do not set it.
-        template: optional NAME of an installed md2 template (under
-            `~/.md2/templates/`) — e.g. a brand template. Ignored when
-            `template_css` / `template_path` is given.
-        template_css: optional brand CSS applied on top of the default theme
-            (colours / fonts / logo positioning) — passed by value, no file
-            needed. Wins over `template_path` and `template`.
-        template_path: optional workspace path to a brand-CSS file, resolved by
-            the read broker — the by-reference form of `template_css`, for
-            overrides too big to inline (e.g. embedded `@font-face` data URIs).
-            Its content is applied exactly like `template_css`. Ignored when an
-            explicit `template_css` is also given.
+        template: optional NAME of an installed md2 template (under `~/.md2/templates/`) — e.g. a brand template. Ignored when `template_css` / `template_path` is given.
+        template_css: optional brand CSS applied on top of the default theme (colours / fonts / logo positioning) — passed by value, no file needed. Wins over `template_path` and `template`.
+        template_path: optional workspace path to a brand-CSS file, resolved by the read broker — the by-reference form of `template_css`, for overrides too big to inline (e.g. embedded `@font-face` data URIs). Its content is applied exactly like `template_css`. Ignored when an explicit `template_css` is also given.
         dark: render on md2's dark theme.
-        agent_binding: injected by the platform (M-SEC-TOKEN-BINDING-1
-            second factor for the workspace-file broker) — do not set it.
+        agent_binding: injected by the platform (M-SEC-TOKEN-BINDING-1 second factor for the workspace-file broker) — do not set it.
 
     Returns:
-        Normally `{path, filename, size_bytes}` — the PDF is written into your
-        workspace at `path`; send it with `[[attach: <path>]]`. If the workspace
-        broker isn't configured (dev), falls back to `{filename, size_bytes,
-        contents_base64}`.
+        Normally `{path, filename, size_bytes}` — the PDF is written into your workspace at `path`; send it with `[[attach: <path>]]`. If the workspace broker isn't configured (dev), falls back to `{filename, size_bytes, contents_base64}`.
     """
     if not markdown_content.strip():
         raise ValueError("markdown_content is empty")
