@@ -1,72 +1,91 @@
 # cerase-deck-renderer-mcp
 
-MCP server that renders md2-flavoured markdown into a PDF deck using
-[md2-presenter](https://pypi.org/project/md2-presenter/) and headless
-Chromium.
+An MCP server that turns a presentation written in md2 markdown into a PDF. It
+converts the markdown to an HTML deck with
+[md2-presenter](https://pypi.org/project/md2-presenter/) 0.2.1 and prints that
+HTML to PDF with headless Chromium. It calls no model.
 
-This directory is the canonical source inside the [Cerase
-repo](https://github.com/cerase-ai/cerase). The public mirror lives at
-[`cerase-ai/cerase-deck-renderer-mcp`](https://github.com/cerase-ai/cerase-deck-renderer-mcp)
-for standalone use by anyone building an agent that needs deck rendering.
+## Tools
 
-## Build
+| Tool | What it does | Arguments | Returns |
+|---|---|---|---|
+| `render` | Renders md2 markdown into a deck PDF. | `markdown_content`; optional `output_filename` (default `presentation.pdf`), `template`, `template_css`, `template_path`, `dark`; `agent_id`, `agent_binding` | `{path, filename, size_bytes}`, or `{filename, size_bytes, contents_base64}` without the workspace broker |
 
-From the Cerase repo root:
+The output is always a PDF, whatever extension `output_filename` carries.
 
-```bash
-./cli.sh build deck-renderer
+Theming:
+
+- `template` is the name of an md2 template installed under
+  `~/.md2/templates/` in the container (letters, digits, `_` and `-` only).
+- `template_css` is CSS appended to md2's `default` template for this render
+  only, so brand colours and fonts override the default theme.
+- `template_path` is a file in the calling assistant's workspace whose content
+  is used as `template_css`, for CSS too large to pass inline (for example
+  fonts embedded as `data:` URIs).
+- Precedence: `template_css`, then `template_path`, then `template`.
+- `dark` renders on md2's dark theme.
+
+The markdown syntax (`+++` TOML front matter, `---` between slides, charts,
+two-column layouts, palettes) is documented on the
+[md2-presenter PyPI page](https://pypi.org/project/md2-presenter/). The
+[`deck` skill](https://github.com/cerase-ai/deck-skill) is the Cerase skill
+that writes a deck in this syntax and calls this tool.
+
+Inside Cerase the gateway fills `agent_id` and
+`agent_binding`; the model never sets them. The PDF is written into the
+calling assistant's workspace at `outputs/<output_filename>` with
+`PUT /api/internal/workspace-file/<agent_id>?path=…` on the Cerase
+control-plane, presenting `CERASE_INTERNAL_SECRET` as a bearer and
+`agent_binding` as `X-Cerase-Agent-Binding`, and the tool returns that path.
+When `agent_id`, `CERASE_CONTROL_PLANE_URL` or `CERASE_INTERNAL_SECRET` is
+missing, the PDF comes back inline as base64 instead. A `template_path` is
+read locally when it exists under `CERASE_TOOL_WORKSPACE_ROOT`, otherwise
+fetched from the same control-plane endpoint with `GET`.
+
+## Settings
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CERASE_CONTROL_PLANE_URL` | none | Control-plane base URL for writing the PDF into the workspace and reading a `template_path`. |
+| `CERASE_INTERNAL_SECRET` | none | Bearer token for those requests. |
+| `CERASE_TOOL_WORKSPACE_ROOT` | `/workspace` | Directory a `template_path` is read from locally; a path resolving outside it is never opened. |
+
+## Installation
+
+The connector is published in the Cerase Marketplace as
+`studio.guidance/cerase-deck-renderer`
+([marketplace page](https://marketplace.cerase.ai/en/p/studio.guidance/cerase-deck-renderer)).
+Every Cerase appliance installs it at boot, so its assistants have it without
+an install step.
+
+Each push to `main` runs the tests and publishes
+`ghcr.io/cerase-ai/cerase-deck-renderer-mcp` (`.github/workflows/publish.yml`).
+
+## Build and run locally
+
+```sh
+docker build -t cerase-deck-renderer-mcp .
+docker run --rm -p 3000:3000 cerase-deck-renderer-mcp
 ```
 
-(Equivalent to `docker build -t cerase-deck-renderer-mcp:0.1.0-dev .`)
+`server.py` speaks MCP over stdio; the image runs it behind `mcp-proxy`, which
+serves Streamable HTTP at `http://localhost:3000/mcp` and SSE at
+`http://localhost:3000/sse`. Run without the control-plane variables, `render`
+returns the PDF as base64. Chromium runs with `--no-sandbox`, because the
+container lacks the namespaces its sandbox needs; the process runs as the
+unprivileged user `appuser`.
 
-## Run standalone
+The image's `HEALTHCHECK` runs `scripts/healthcheck.py`, an MCP client that
+completes the handshake and lists the tools over `/mcp`; its
+`CERASE_HEALTHCHECK_*` variables exist to point it at a stub in tests.
 
-```bash
-docker run --rm -p 3000:3000 cerase-deck-renderer-mcp:0.1.0-dev
-# MCP endpoint: http://localhost:3000/sse
+The tests fake md2, Chromium and the control-plane:
+
+```sh
+pip install -r requirements-dev.txt
+python -m pytest tests/
 ```
-
-## Tool surface
-
-One tool:
-
-```
-render(
-    markdown_content: str,
-    output_filename: str = "presentation.pdf",
-    template: str | None = None,        # NAME of an installed md2 template
-    template_css: str | None = None,    # brand CSS override, by value
-    template_path: str | None = None,   # brand CSS override, by workspace ref
-    dark: bool = False,
-) -> dict
-```
-
-Theming: `template` selects an installed md2 template; `template_css`
-appends a brand CSS override on top of the default theme by value;
-`template_path` is the by-reference form (a workspace file the read
-broker resolves, for overrides too big to inline — e.g. embedded
-`@font-face` data URIs). Precedence: `template_css` > `template_path` >
-`template`.
-
-Returns `{path, filename, size_bytes}` when the workspace write-broker is
-configured — the PDF is written into the caller's workspace and returned
-as a small handle. Falls back to `{filename, size_bytes, contents_base64}`
-(the full PDF inline) for a dev / non-agent call.
-
-## md2 syntax reference
-
-The markdown follows md2 conventions (`+++` TOML frontmatter, `---` slide
-separator). See the
-[deck skill](https://github.com/cerase-ai/cerase-skills/tree/main/deck)
-for the cheatsheet and the slide pattern library.
-
-## Why a dedicated container
-
-Pattern coherent with the rest of the Cerase MCP catalog: one container
-per MCP, isolated, per-MCP resource accounting, no `bash:allow` leak
-into the agent slot image. Slot agent containers stay light (no
-chromium, no md2).
 
 ## License
 
-MIT — see [LICENSE](./LICENSE) in the public mirror repo.
+MIT. See [LICENSE](LICENSE).
