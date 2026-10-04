@@ -1,6 +1,7 @@
 # Cerase Deck Renderer MCP — markdown → HTML → PDF via md2 + headless chromium.
 #
-# Exposed tool: render(markdown_content, output_filename?) → base64 PDF.
+# Exposed tool: render(markdown_content, output_filename?, …) → the deck PDF, or
+# the HTML deck when output_filename ends in .html, written to the workspace.
 #
 # Distribution: this Dockerfile is the canonical build target inside the
 # Cerase repo (built locally via `./cli.sh build deck-renderer`). Mirrored
@@ -29,9 +30,9 @@ COPY requirements.txt requirements.lock /tmp/
 RUN pip install --no-cache-dir -r /tmp/requirements.lock \
     && rm /tmp/requirements.txt /tmp/requirements.lock
 
-# md2-presenter — the markdown → HTML/PDF tool the renderer wraps.
-# Pinned version aligns with what we publish on PyPI from
-# github.com/guidance-studio/md2.
+# md2-presenter — the markdown → HTML tool the renderer wraps, pinned to the
+# PyPI release whose syntax the deck skill's md2-syntax.md describes. Change
+# the pin and that file together: the skill writes exactly what it documents.
 # M-DECK-NONROOT-MD2-1: install into a world-traversable system location, NOT
 # root's home. uv puts the tool venv under UV_TOOL_DIR and the launcher into
 # UV_TOOL_BIN_DIR — both /opt and /usr/local/bin are 0755, so the uid-1000

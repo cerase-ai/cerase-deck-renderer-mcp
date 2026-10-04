@@ -177,6 +177,8 @@ def test_a_large_deck_returns_a_path_handle_and_never_inlines_it(
         "path": "outputs/q3.pdf",
         "filename": "q3.pdf",
         "size_bytes": len(LARGE),
+        "format": "pdf",
+        "pages": 0,
     }
     # An inlined payload is the defect: the federation would truncate it at 1 MB
     # and hand the model a corrupt PDF that reports success.
@@ -345,3 +347,61 @@ def test_a_workspace_path_with_no_local_file_and_no_broker_is_an_error(
     monkeypatch.setenv("CERASE_TOOL_WORKSPACE_ROOT", str(tmp_path))
     with pytest.raises(ValueError, match="no control-plane"):
         server._load_workspace_bytes(AGENT, str(tmp_path / "absent.css"))
+
+
+# ─── HTML output, the page box, and the page count ───────────────────────
+#
+# The deck skill offers HTML as a format of its own, and `render` used to print
+# a PDF whatever the filename said: asked for `presentation.html`, it wrote PDF
+# bytes under that name. And Chromium prints on US Letter portrait unless the
+# page names a size, so every deck came out on Letter portrait while the skill's
+# print rules are written for a landscape slide.
+
+def test_an_html_filename_returns_the_html_deck_and_runs_no_chromium(binaries, broker, broker_configured):
+    result = server.render(DECK_MD, output_filename="presentation.html", agent_id=AGENT)
+    assert result["path"] == "outputs/presentation.html"
+    assert result["format"] == "html"
+    assert all(argv[0] != server.CHROMIUM_BIN for argv in binaries.calls)
+    sent = broker.last.data.decode("utf-8")
+    assert sent.startswith("<html>") and "slides" in sent
+
+
+def test_the_pdf_prints_on_a4_landscape_by_default(binaries, broker, broker_configured):
+    seen = {}
+
+    def look(argv):
+        if argv[0] == server.CHROMIUM_BIN:
+            src = argv[-1][len("file://"):]
+            seen["html"] = open(src, encoding="utf-8").read()
+
+    binaries.observer = look
+    server.render(DECK_MD, agent_id=AGENT)
+    assert "size: A4 landscape" in seen["html"]
+
+
+def test_paper_and_orientation_reach_the_page(binaries, broker, broker_configured):
+    result = server.render(DECK_MD, output_filename="deck.html", agent_id=AGENT, paper="letter", orientation="portrait")
+    assert "size: letter portrait" in broker.last.data.decode("utf-8")
+    assert result["format"] == "html"
+
+
+def test_an_unknown_paper_or_orientation_is_refused(binaries, broker):
+    with pytest.raises(ValueError, match="paper"):
+        server.render(DECK_MD, paper="A0")
+    with pytest.raises(ValueError, match="orientation"):
+        server.render(DECK_MD, orientation="sideways")
+
+
+def test_a_pdf_answer_carries_its_page_count(binaries, broker, broker_configured):
+    binaries.payload = b"%PDF-1.4\n1 0 obj << /Type /Pages /Count 3 >>\n2 0 obj << /Type /Page >>\n3 0 obj << /Type /Page >>\n4 0 obj << /Type /Page >>\n"
+    result = server.render(DECK_MD, agent_id=AGENT)
+    assert result["format"] == "pdf"
+    assert result["pages"] == 3
+
+
+def test_chromium_prints_no_header_or_footer_of_its_own(binaries, broker, broker_configured):
+    # Chromium 154 ignores the old `--print-to-pdf-no-header`: every page of a
+    # deck carried the print date at the top and the render's temp file URL at
+    # the bottom. `--no-pdf-header-footer` is the flag it reads.
+    server.render(DECK_MD, agent_id=AGENT)
+    assert "--no-pdf-header-footer" in binaries.argv_for(server.CHROMIUM_BIN)
