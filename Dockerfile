@@ -53,6 +53,11 @@ COPY server.py /app/server.py
 # container with no server left in it. The script's header carries the detail.
 COPY scripts/healthcheck.py /app/healthcheck.py
 
+# The gate that owns :3000 and answers only a request carrying this runner's
+# token; the bridge listens on 127.0.0.1:3001 behind it.
+COPY scripts/runner-gate.py /app/runner-gate.py
+ENV CERASE_HEALTHCHECK_URL=http://127.0.0.1:3001/mcp
+
 # OPT-14: non-root runtime user. chromium runs with --no-sandbox per
 # server.py (the comment around the chromium spawn references this).
 RUN groupadd -r appuser \
@@ -73,6 +78,8 @@ EXPOSE 3000
 # request that has to reach the stdio child. The script keeps itself inside the
 # timeout by budget, so the timeout below is its ceiling and not its schedule.
 HEALTHCHECK --interval=5m --start-interval=5s --timeout=10s --start-period=60s --retries=2 \
-    CMD python3 /app/healthcheck.py || exit 1
+    CMD python3 /app/runner-gate.py --probe && python3 /app/healthcheck.py || exit 1
 
-ENTRYPOINT ["sh", "-c", "exec mcp-proxy --port 3000 --host 0.0.0.0 --pass-environment -- python /app/server.py"]
+ENTRYPOINT ["python3", "/app/runner-gate.py", "--", "mcp-proxy", \
+    "--port", "3001", "--host", "127.0.0.1", "--pass-environment", "--", \
+    "python", "/app/server.py"]
