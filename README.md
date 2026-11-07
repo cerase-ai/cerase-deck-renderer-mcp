@@ -41,19 +41,18 @@ Inside Cerase the gateway fills `agent_id` and
 `agent_binding`; the model never sets them. The file is written into the
 calling assistant's workspace at `outputs/<output_filename>` with
 `PUT /api/internal/workspace-file/<agent_id>?path=…` on the Cerase
-control-plane, presenting `CERASE_INTERNAL_SECRET` as a bearer and
-`agent_binding` as `X-Cerase-Agent-Binding`, and the tool returns that path.
-When `agent_id`, `CERASE_CONTROL_PLANE_URL` or `CERASE_INTERNAL_SECRET` is
-missing, the file comes back inline as base64 instead. A `template_path` is
-read locally when it exists under `CERASE_TOOL_WORKSPACE_ROOT`, otherwise
-fetched from the same control-plane endpoint with `GET`.
+control-plane, presenting `agent_binding` as `X-Cerase-Agent-Binding`, and the
+tool returns that path. When `agent_id`, `CERASE_CONTROL_PLANE_URL` or
+`agent_binding` is missing, the file comes back inline as base64 instead. A
+`template_path` is read locally when it exists under
+`CERASE_TOOL_WORKSPACE_ROOT`, otherwise fetched from the same control-plane
+endpoint with `GET`.
 
 ## Settings
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `CERASE_CONTROL_PLANE_URL` | none | Control-plane base URL for writing the deck into the workspace and reading a `template_path`. |
-| `CERASE_INTERNAL_SECRET` | none | Bearer token for those requests. |
 | `CERASE_TOOL_WORKSPACE_ROOT` | `/workspace` | Directory a `template_path` is read from locally; a path resolving outside it is never opened. |
 
 ## Installation

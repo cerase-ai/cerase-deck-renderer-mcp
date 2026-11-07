@@ -8,7 +8,7 @@ reads as a successful render — so the large-deck case is asserted here byte fo
 byte, not by size alone.
 
 The branch between a handle and inline base64 is the BROKER CONFIGURATION
-(agent_id + control-plane URL + internal secret), never the deck's size. Both
+(agent_id + control-plane URL + agent binding), never the deck's size. Both
 sizes are covered below in both configurations so that a future size threshold
 cannot be introduced unnoticed.
 
@@ -144,13 +144,11 @@ def broker(monkeypatch):
 @pytest.fixture
 def broker_configured(monkeypatch):
     monkeypatch.setenv("CERASE_CONTROL_PLANE_URL", "http://cerase-control-plane")
-    monkeypatch.setenv("CERASE_INTERNAL_SECRET", "internal-secret")
 
 
 @pytest.fixture
 def broker_unconfigured(monkeypatch):
     monkeypatch.delenv("CERASE_CONTROL_PLANE_URL", raising=False)
-    monkeypatch.delenv("CERASE_INTERNAL_SECRET", raising=False)
 
 
 @pytest.fixture
@@ -187,7 +185,7 @@ def test_a_large_deck_returns_a_path_handle_and_never_inlines_it(
 
 def test_broker_receives_every_byte_of_a_large_deck(binaries, broker, broker_configured):
     binaries.payload = LARGE
-    server.render(DECK_MD, output_filename="q3.pdf", agent_id=AGENT)
+    server.render(DECK_MD, output_filename="q3.pdf", agent_id=AGENT, agent_binding=BINDING)
     req = broker.last
     assert req.get_method() == "PUT"
     assert req.full_url.endswith("/api/internal/workspace-file/agent-7?path=outputs%2Fq3.pdf")
@@ -195,14 +193,30 @@ def test_broker_receives_every_byte_of_a_large_deck(binaries, broker, broker_con
     assert req.data == LARGE
 
 
-def test_broker_request_carries_the_internal_secret_and_the_agent_binding(
+def test_broker_request_sends_the_binding_and_no_authorization(
     binaries, broker, broker_configured
 ):
     server.render(DECK_MD, agent_id=AGENT, agent_binding=BINDING)
     h = headers_of(broker.last)
-    assert h["authorization"] == "Bearer internal-secret"
+    assert "authorization" not in h
     assert h["x-cerase-agent-binding"] == BINDING
     assert h["content-type"] == "application/octet-stream"
+
+
+def test_a_call_works_with_the_internal_secret_unset(
+    binaries, broker, broker_configured, monkeypatch
+):
+    monkeypatch.delenv("CERASE_INTERNAL_SECRET", raising=False)
+    result = server.render(DECK_MD, agent_id=AGENT, agent_binding=BINDING)
+    assert result["path"] == "outputs/presentation.pdf"
+
+
+def test_a_call_without_a_binding_falls_back_inline_and_never_reaches_the_network(
+    binaries, broker, broker_configured
+):
+    result = server.render(DECK_MD, agent_id=AGENT)
+    assert "path" not in result
+    assert broker.requests == []
 
 
 def test_a_small_deck_takes_the_same_handle_path(binaries, broker, broker_configured):
@@ -210,7 +224,9 @@ def test_a_small_deck_takes_the_same_handle_path(binaries, broker, broker_config
     # this, a size threshold could be introduced and only the large case would
     # notice.
     binaries.payload = SMALL
-    result = server.render(DECK_MD, output_filename="one-slide.pdf", agent_id=AGENT)
+    result = server.render(
+        DECK_MD, output_filename="one-slide.pdf", agent_id=AGENT, agent_binding=BINDING
+    )
     assert result["path"] == "outputs/one-slide.pdf"
     assert "contents_base64" not in result
 
@@ -270,12 +286,12 @@ def test_chromium_failing_is_reported(binaries, broker, broker_configured):
 # ─── Theming ─────────────────────────────────────────────────────────────
 
 def test_dark_reaches_md2(binaries, broker, broker_configured):
-    server.render(DECK_MD, agent_id=AGENT, dark=True)
+    server.render(DECK_MD, agent_id=AGENT, agent_binding=BINDING, dark=True)
     assert "--dark" in binaries.argv_for(server.MD2_BIN)
 
 
 def test_a_named_template_is_passed_through(binaries, broker, broker_configured):
-    server.render(DECK_MD, agent_id=AGENT, template="brand-2026")
+    server.render(DECK_MD, agent_id=AGENT, agent_binding=BINDING, template="brand-2026")
     argv = binaries.argv_for(server.MD2_BIN)
     assert argv[argv.index("--template") + 1] == "brand-2026"
 
@@ -297,7 +313,7 @@ def test_brand_css_derives_a_one_shot_template_and_removes_it(
     captured = {}
     _watch_derived_style(binaries, templates_root, captured)
 
-    server.render(DECK_MD, agent_id=AGENT, template_css=css)
+    server.render(DECK_MD, agent_id=AGENT, agent_binding=BINDING, template_css=css)
 
     assert captured["css"].startswith(":root { --bg: white; }")  # default first
     assert captured["css"].endswith(css)                          # brand last wins
@@ -325,7 +341,9 @@ def test_a_by_reference_template_is_read_through_the_broker_and_applied(
     captured = {}
     _watch_derived_style(binaries, templates_root, captured)
 
-    server.render(DECK_MD, agent_id=AGENT, template_path="brand/deck.css")
+    server.render(
+        DECK_MD, agent_id=AGENT, agent_binding=BINDING, template_path="brand/deck.css"
+    )
 
     assert captured["css"].endswith(css)
     # The first broker call is the READ of the template, a GET, not the PDF write.
@@ -349,6 +367,15 @@ def test_a_workspace_path_with_no_local_file_and_no_broker_is_an_error(
         server._load_workspace_bytes(AGENT, str(tmp_path / "absent.css"))
 
 
+def test_a_workspace_read_without_a_binding_is_refused_without_reaching_the_network(
+    monkeypatch, tmp_path, broker, broker_configured
+):
+    monkeypatch.setenv("CERASE_TOOL_WORKSPACE_ROOT", str(tmp_path))
+    with pytest.raises(ValueError, match="agent_binding"):
+        server._load_workspace_bytes(AGENT, str(tmp_path / "absent.css"))
+    assert broker.requests == []
+
+
 # ─── HTML output, the page box, and the page count ───────────────────────
 #
 # The deck skill offers HTML as a format of its own, and `render` used to print
@@ -358,7 +385,9 @@ def test_a_workspace_path_with_no_local_file_and_no_broker_is_an_error(
 # print rules are written for a landscape slide.
 
 def test_an_html_filename_returns_the_html_deck_and_runs_no_chromium(binaries, broker, broker_configured):
-    result = server.render(DECK_MD, output_filename="presentation.html", agent_id=AGENT)
+    result = server.render(
+        DECK_MD, output_filename="presentation.html", agent_id=AGENT, agent_binding=BINDING
+    )
     assert result["path"] == "outputs/presentation.html"
     assert result["format"] == "html"
     assert all(argv[0] != server.CHROMIUM_BIN for argv in binaries.calls)
@@ -375,12 +404,15 @@ def test_the_pdf_prints_on_a4_landscape_by_default(binaries, broker, broker_conf
             seen["html"] = open(src, encoding="utf-8").read()
 
     binaries.observer = look
-    server.render(DECK_MD, agent_id=AGENT)
+    server.render(DECK_MD, agent_id=AGENT, agent_binding=BINDING)
     assert "size: A4 landscape" in seen["html"]
 
 
 def test_paper_and_orientation_reach_the_page(binaries, broker, broker_configured):
-    result = server.render(DECK_MD, output_filename="deck.html", agent_id=AGENT, paper="letter", orientation="portrait")
+    result = server.render(
+        DECK_MD, output_filename="deck.html", agent_id=AGENT, agent_binding=BINDING,
+        paper="letter", orientation="portrait",
+    )
     assert "size: letter portrait" in broker.last.data.decode("utf-8")
     assert result["format"] == "html"
 
@@ -394,7 +426,7 @@ def test_an_unknown_paper_or_orientation_is_refused(binaries, broker):
 
 def test_a_pdf_answer_carries_its_page_count(binaries, broker, broker_configured):
     binaries.payload = b"%PDF-1.4\n1 0 obj << /Type /Pages /Count 3 >>\n2 0 obj << /Type /Page >>\n3 0 obj << /Type /Page >>\n4 0 obj << /Type /Page >>\n"
-    result = server.render(DECK_MD, agent_id=AGENT)
+    result = server.render(DECK_MD, agent_id=AGENT, agent_binding=BINDING)
     assert result["format"] == "pdf"
     assert result["pages"] == 3
 
@@ -403,5 +435,5 @@ def test_chromium_prints_no_header_or_footer_of_its_own(binaries, broker, broker
     # Chromium 154 ignores the old `--print-to-pdf-no-header`: every page of a
     # deck carried the print date at the top and the render's temp file URL at
     # the bottom. `--no-pdf-header-footer` is the flag it reads.
-    server.render(DECK_MD, agent_id=AGENT)
+    server.render(DECK_MD, agent_id=AGENT, agent_binding=BINDING)
     assert "--no-pdf-header-footer" in binaries.argv_for(server.CHROMIUM_BIN)

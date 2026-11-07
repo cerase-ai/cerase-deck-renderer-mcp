@@ -102,18 +102,14 @@ def _write_workspace_file(
     non-agent call).
     """
     cp = os.environ.get("CERASE_CONTROL_PLANE_URL", "").rstrip("/")
-    secret = os.environ.get("CERASE_INTERNAL_SECRET", "")
-    if not agent_id or not cp or not secret:
+    if not agent_id or not cp or not binding:
         return False
     qs = urlencode({"path": path})
-    # M-SEC-TOKEN-BINDING-1: the broker requires the calling agent's binding
-    # (gateway-injected tool arg) besides the shared bearer.
+    # The broker scopes the write to the caller by the gateway-injected binding.
     headers = {
-        "Authorization": f"Bearer {secret}",
         "Content-Type": "application/octet-stream",
+        "X-Cerase-Agent-Binding": binding,
     }
-    if binding:
-        headers["X-Cerase-Agent-Binding"] = binding
     req = urllib.request.Request(
         f"{cp}/api/internal/workspace-file/{agent_id}?{qs}",
         data=data,
@@ -152,16 +148,13 @@ def _load_workspace_bytes(agent_id: str | None, path: str, binding: str = "") ->
         pass  # not a safe local path → let the control-plane re-guard + serve
 
     cp = os.environ.get("CERASE_CONTROL_PLANE_URL", "").rstrip("/")
-    secret = os.environ.get("CERASE_INTERNAL_SECRET", "")
-    if not agent_id or not cp or not secret:
+    if not agent_id or not cp or not binding:
         raise ValueError(
             "workspace `template_path` given but no local file and no control-plane "
-            "configured (agent_id / CERASE_CONTROL_PLANE_URL / CERASE_INTERNAL_SECRET)"
+            "configured (agent_id / CERASE_CONTROL_PLANE_URL / agent_binding)"
         )
     qs = urlencode({"path": path})
-    headers = {"Authorization": f"Bearer {secret}"}
-    if binding:
-        headers["X-Cerase-Agent-Binding"] = binding
+    headers = {"X-Cerase-Agent-Binding": binding}
     req = urllib.request.Request(
         f"{cp}/api/internal/workspace-file/{agent_id}?{qs}",
         headers=headers,
@@ -266,7 +259,7 @@ def render(
         dark: render on md2's dark theme.
         orientation: `landscape` (default) or `portrait`, the printed page.
         paper: `A4` (default) or `letter`.
-        agent_binding: injected by the platform (M-SEC-TOKEN-BINDING-1 second factor for the workspace-file broker) — do not set it.
+        agent_binding: injected by the platform (the workspace-file broker's second factor) — do not set it.
 
     Returns:
         Normally `{path, filename, size_bytes, format}` — the file is written into your workspace at `path`; send it with `[[attach: <path>]]`. A PDF answer also carries `pages`, the printed page count: one cover plus one page per `## ` slide, and more means a slide spilled onto a second page. If the workspace broker isn't configured (dev), falls back to `{filename, size_bytes, format, contents_base64}`.
